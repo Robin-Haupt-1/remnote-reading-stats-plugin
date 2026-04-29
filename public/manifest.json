@@ -1,16 +1,16 @@
 {
-  "author": "ROBIN HAUPT",
-  "name": "test pilot - export highlights",
+  "author": "Robin Haupt",
+  "name": "Reading Stats",
   "description": "",
   "enableOnMobile": true,
-  "id": "ROBINH-mo2g8ywtest",
-  "unlisted": true,
+  "id": "reading-stats",
+  "unlisted": false,
   "manifestVersion": 1,
-  "repoUrl": "https://github.com/Robin-Haupt-1/remnote-export-highlights-plugin",
+  "repoUrl": "https://github.com/Robin-Haupt-1/remnote-reading-stats-plugin",
   "version": {
-    "major": 0,
+    "major": 1,
     "minor": 0,
-    "patch": 1
+    "patch": 0
   },
   "requestNative": true,
   "requiredScopes": [
