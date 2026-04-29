@@ -1,0 +1,11 @@
+services:
+
+  client:
+    build:
+      context: .
+    volumes:
+      - ./:/usr/src/app
+    ports:
+      - "8080:8080"
+    command: npm run dev
+    stop_grace_period: 0s
