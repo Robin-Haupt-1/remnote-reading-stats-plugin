@@ -137,15 +137,9 @@ async function detectOpenSurface(plugin: RNPlugin): Promise<OpenSurfaceSnapshot>
       fileUrl = await rem.getPowerupProperty(BuiltInPowerupCodes.UploadedFile, 'URL').catch(() => undefined);
     }
 
-    if (hasPdfHighlight) {
+    if (hasUploadedFile) {
       kind = 'pdf';
-    } else if (hasUploadedFile) {
-      const looksLikePdf =
-        /pdf/i.test(fileType ?? '') ||
-        /\.pdf($|\?)/i.test(fileUrl ?? '') ||
-        /pdf/i.test(fileName ?? '');
-      kind = looksLikePdf ? 'pdf' : 'file';
-    } else if (isDocument) {
+    }   else if (isDocument) {
       kind = 'document';
     }
 
@@ -183,7 +177,7 @@ function computeAppHasFocus(focus: FocusSnapshot): boolean {
 }
 
 function getOpenDocumentName(open: OpenSurfaceSnapshot): string {
-  return open.fileName ?? open.fileTitle ?? open.remText ?? 'n/a';
+  return open.fileName ?? 'unknown';
 }
 
 function getOpenDocumentKey(open: OpenSurfaceSnapshot): string {
@@ -345,7 +339,7 @@ function startOpenDocumentWatcher(plugin: RNPlugin, intervalMs = 750): () => voi
     running = true;
 
     try {
-      await checkOpenDocumentChange(plugin, 'interval watcher');
+      await checkOpenDocumentChange(plugin, 'interval watchers');
     } catch (error) {
       logDetective('Open document watcher tick failed', error);
     } finally {
