@@ -1,7 +1,7 @@
 {
   "author": "Robin Haupt",
   "name": "Reading Stats",
-  "description": "Export a history of when you've read which documents.",
+  "description": "Export a history of when you've read which documents as a csv file.",
   "enableOnMobile": true,
   "id": "reading-stats",
   "unlisted": false,
