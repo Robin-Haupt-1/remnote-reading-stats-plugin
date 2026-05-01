@@ -3,290 +3,328 @@ import {
   declareIndexPlugin,
   type ReactRNPlugin,
   type Rem,
-  type RNPlugin,
 } from '@remnote/plugin-sdk';
+import '../style.css';
+import '../index.css';
 
-type EndReason = 'visibility' | 'closed' | 'switched' | 'deactivate';
-
-type ReadingEvent = {
-  startedTimestamp: number;
-  finishedTimestamp: number;
-  documentName: string;
-  endedReason: EndReason;
+type HighlightRow = {
+  fileName: string;
+  fullText: string;
+  pageNumber: string;
+  updatedTimestamp: string;
 };
 
-type ReadingSessionState = {
-  current: {
-    startedTimestamp: number;
-    documentName: string;
-  } | null;
-  events: ReadingEvent[];
+type SlotProbeResult = {
+  remId: string;
+  remText: string;
+  slot: string;
+  ok: boolean;
+  value: string;
 };
 
-const READING_STATE_KEY = 'reading-stats:events-v1';
-const TICK_MS = 1000;
+const LOG_PREFIX = '[UploadedFile Slot Demo]';
 
-let cleanupListeners: (() => void) | undefined;
-let stopOpenDocumentWatcher: (() => void) | undefined;
-let stopStateFlushTicker: (() => void) | undefined;
-let sessionState: ReadingSessionState = { current: null, events: [] };
-let stateDirty = false;
-let flushingState = false;
+const UPLOADED_FILE_SLOTS_TO_PROBE = [
+  // Known/observed working slots.
+  'Name',
+  'Title',
+  'URL',
+  'Type',
+  'Authors',
+  'ViewerData',
+
+  // Observed problematic slots.
+  'ReadPercent',
+  'LastReadDate',
+  'Theme',
+  'HasNoTextLayer',
+];
 
 function logMessage(message: string): void {
-  console.log(`[Reading Stats] ${message}`);
+  console.log(`${LOG_PREFIX} ${message}`);
 }
 
-function parseReadingState(value: unknown): ReadingSessionState {
-  if (!value || typeof value !== 'object') return { current: null, events: [] };
-
-  const maybeState = value as Partial<ReadingSessionState>;
-  const events = Array.isArray(maybeState.events)
-    ? maybeState.events.filter(
-        (event): event is ReadingEvent =>
-          Boolean(
-            event &&
-              typeof event.startedTimestamp === 'number' &&
-              typeof event.finishedTimestamp === 'number' &&
-              typeof event.documentName === 'string' &&
-              typeof event.endedReason === 'string',
-          ),
-      )
-    : [];
-
-  const current =
-    maybeState.current &&
-    typeof maybeState.current.startedTimestamp === 'number' &&
-    typeof maybeState.current.documentName === 'string'
-      ? {
-          startedTimestamp: maybeState.current.startedTimestamp,
-          documentName: maybeState.current.documentName,
-        }
-      : null;
-
-  return { current, events };
-}
-
-async function loadReadingState(plugin: RNPlugin): Promise<void> {
-  const value = await plugin.storage.getSynced(READING_STATE_KEY).catch(() => undefined);
-  sessionState = parseReadingState(value);
-}
-
-async function flushReadingState(plugin: RNPlugin, force = false): Promise<void> {
-  if ((!stateDirty && !force) || flushingState) return;
-
-  flushingState = true;
+function safeJson(value: unknown): string {
   try {
-    await plugin.storage.setSynced(READING_STATE_KEY, sessionState);
-    stateDirty = false;
-  } finally {
-    flushingState = false;
+    const json = JSON.stringify(value);
+    if (!json) return String(value);
+    return json.length > 700 ? `${json.slice(0, 700)}… <truncated>` : json;
+  } catch {
+    return String(value);
   }
 }
 
-function markDirty(): void {
-  stateDirty = true;
-}
-
-function closeCurrentEvent(reason: EndReason): void {
-  if (!sessionState.current) return;
-
-  sessionState.events.push({
-    startedTimestamp: sessionState.current.startedTimestamp,
-    finishedTimestamp: Date.now(),
-    documentName: sessionState.current.documentName,
-    endedReason: reason,
-  });
-  sessionState.current = null;
-  markDirty();
-}
-
-function startCurrentEvent(documentName: string): void {
-  sessionState.current = {
-    startedTimestamp: Date.now(),
-    documentName,
-  };
-  markDirty();
-}
-
-async function getOpenUploadedFileRem(plugin: RNPlugin): Promise<Rem | null> {
-  const paneId = await plugin.window.getFocusedPaneId().catch(() => undefined);
-  const remId = paneId
-    ? await plugin.window.getOpenPaneRemId(paneId).catch(() => undefined)
-    : undefined;
-
-  if (!remId) return null;
-
-  const rem = await plugin.rem.findOne(remId);
-  if (!rem) return null;
-
-  const hasUploadedFile = await rem.hasPowerup(BuiltInPowerupCodes.UploadedFile).catch(() => false);
-  return hasUploadedFile ? rem : null;
-}
-
-async function getOpenUploadedFileName(plugin: RNPlugin): Promise<string | null> {
-  const rem = await getOpenUploadedFileRem(plugin);
-  if (!rem) return null;
-
-  const name = await rem.getPowerupProperty(BuiltInPowerupCodes.UploadedFile, 'Name').catch(() => undefined);
-  return typeof name === 'string' && name.length > 0 ? name : 'unknown';
-}
-
-async function checkOpenDocumentChange(plugin: RNPlugin): Promise<void> {
-  const name = await getOpenUploadedFileName(plugin);
-
-  if (!sessionState.current) {
-    if (name) {
-      startCurrentEvent(name);
-      logMessage(`started reading: ${name}`);
-    }
-    return;
-  }
-
-  if (!name) {
-    closeCurrentEvent('closed');
-    logMessage('reading ended: document closed');
-    return;
-  }
-
-  if (sessionState.current.documentName !== name) {
-    closeCurrentEvent('switched');
-    startCurrentEvent(name);
-    logMessage(`switched reading document: ${name}`);
+async function remTextToString(plugin: ReactRNPlugin, rem: Rem): Promise<string> {
+  try {
+    return await plugin.richText.toString(rem.text);
+  } catch {
+    return '<text unavailable>';
   }
 }
 
-function installVisibilityListeners(): () => void {
-  const onVisibilityChange = () => {
-    if (document.visibilityState !== 'visible') {
-      closeCurrentEvent('visibility');
-      logMessage(`reading ended due to visibility change: ${document.visibilityState}`);
-    }
-  };
-
-  window.addEventListener('blur', onVisibilityChange, true);
-  window.addEventListener('pagehide', onVisibilityChange, true);
-  document.addEventListener('visibilitychange', onVisibilityChange, true);
-
-  return () => {
-    window.removeEventListener('blur', onVisibilityChange, true);
-    window.removeEventListener('pagehide', onVisibilityChange, true);
-    document.removeEventListener('visibilitychange', onVisibilityChange, true);
-  };
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
-function startOpenDocumentWatcher(plugin: RNPlugin, intervalMs = 750): () => void {
-  let stopped = false;
-  let running = false;
+function buildExcelXml(rows: HighlightRow[]): string {
+  const header = `<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:html="http://www.w3.org/TR/REC-html40">
+  <Worksheet ss:Name="Highlights">
+    <Table>
+      <Row>
+        <Cell><Data ss:Type="String">File Name</Data></Cell>
+        <Cell><Data ss:Type="String">Full Text</Data></Cell>
+        <Cell><Data ss:Type="String">Page Number</Data></Cell>
+        <Cell><Data ss:Type="String">Updated Timestamp</Data></Cell>
+      </Row>`;
 
-  const tick = async () => {
-    if (stopped || running) return;
-    running = true;
-    try {
-      await checkOpenDocumentChange(plugin);
-    } finally {
-      running = false;
-    }
-  };
+  const body = rows
+    .map(
+      (row) => `
+      <Row>
+        <Cell><Data ss:Type="String">${escapeXml(row.fileName)}</Data></Cell>
+        <Cell><Data ss:Type="String">${escapeXml(row.fullText)}</Data></Cell>
+        <Cell><Data ss:Type="String">${escapeXml(row.pageNumber)}</Data></Cell>
+        <Cell><Data ss:Type="String">${escapeXml(row.updatedTimestamp)}</Data></Cell>
+      </Row>`,
+    )
+    .join('');
 
-  const intervalId = window.setInterval(() => {
-    void tick();
-  }, intervalMs);
+  const footer = `
+    </Table>
+  </Worksheet>
+</Workbook>`;
 
-  void tick();
-
-  return () => {
-    stopped = true;
-    window.clearInterval(intervalId);
-  };
+  return `${header}${body}${footer}`;
 }
 
-function startStateFlushTicker(plugin: RNPlugin, intervalMs = TICK_MS): () => void {
-  const intervalId = window.setInterval(() => {
-    void flushReadingState(plugin);
-  }, intervalMs);
-
-  return () => {
-    window.clearInterval(intervalId);
-  };
-}
-
-function csvEscape(value: string): string {
-  const escaped = value.replace(/"/g, '""');
-  return /[",\n]/.test(value) ? `"${escaped}"` : escaped;
-}
-
-function downloadCsv(csv: string): void {
+function downloadExcel(xml: string): void {
+  const encoded = btoa(unescape(encodeURIComponent(xml)));
+  const href = `data:application/vnd.ms-excel;base64,${encoded}`;
   const now = new Date().toISOString().replace(/[:.]/g, '-');
-  const href = `data:text/csv;charset=utf-8,${encodeURIComponent(csv)}`;
 
   const link = document.createElement('a');
   link.href = href;
-  link.download = `remnote-reading-events-${now}.csv`;
+  link.download = `remnote-highlights-${now}.xls`;
   link.target = '_blank';
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
 }
 
-async function exportReadingEvents(plugin: RNPlugin): Promise<void> {
-  await flushReadingState(plugin, true);
+async function collectHighlightsForRem(
+  rem: Rem,
+  plugin: ReactRNPlugin,
+  fileName: string,
+  rows: HighlightRow[],
+): Promise<void> {
+  const children = await rem.getChildrenRem();
 
-  const persistedState = parseReadingState(await plugin.storage.getSynced(READING_STATE_KEY).catch(() => undefined));
+  for (const child of children) {
+    const isPdfHighlight = await child.hasPowerup(BuiltInPowerupCodes.PDFHighlight);
 
-  if (persistedState.events.length === 0) {
-    await plugin.app.toast('No reading events found to export.');
+    if (isPdfHighlight) {
+      const fullText = await plugin.richText.toString(child.text);
+      const pageNumber = await plugin.richText.toString((await child.getParentRem())?.text ?? []);
+      const updatedTimestamp = new Date(child.updatedAt).toISOString();
+
+      rows.push({
+        fileName,
+        fullText,
+        pageNumber,
+        updatedTimestamp,
+      });
+    }
+
+    await collectHighlightsForRem(child, plugin, fileName, rows);
+  }
+}
+
+async function getUploadedFileRems(plugin: ReactRNPlugin): Promise<Rem[]> {
+  const filePowerup = await plugin.powerup.getPowerupByCode(BuiltInPowerupCodes.UploadedFile);
+
+  if (!filePowerup) {
+    return [];
+  }
+
+  const taggedRems = await filePowerup.taggedRem();
+  const uploadedFileRems: Rem[] = [];
+
+  for (const rem of taggedRems) {
+    const confirmed = await rem.hasPowerup(BuiltInPowerupCodes.UploadedFile).catch(() => false);
+
+    if (confirmed) {
+      uploadedFileRems.push(rem);
+    }
+  }
+
+  return uploadedFileRems;
+}
+
+async function getUploadedFileName(plugin: ReactRNPlugin, rem: Rem): Promise<string> {
+  const name = await rem
+    .getPowerupProperty(BuiltInPowerupCodes.UploadedFile, 'Name')
+    .catch(() => undefined);
+
+  if (typeof name === 'string' && name.length > 0) {
+    return name;
+  }
+
+  return (await remTextToString(plugin, rem)) || 'Unknown File';
+}
+
+async function exportHighlights(plugin: ReactRNPlugin): Promise<void> {
+  await plugin.app.toast('Exporting PDF highlights to Excel...');
+
+  const pdfRems = await getUploadedFileRems(plugin);
+
+  if (pdfRems.length === 0) {
+    await plugin.app.toast('No uploaded file Rems found.');
     return;
   }
 
-  const header = ['startedTimestamp', 'finishedTimestamp', 'documentName', 'endedReason'];
-  const rows = persistedState.events.map((event) =>
-    [
-      new Date(event.startedTimestamp).toISOString(),
-      new Date(event.finishedTimestamp).toISOString(),
-      event.documentName,
-      event.endedReason,
-    ]
-      .map(csvEscape)
-      .join(','),
+  const rows: HighlightRow[] = [];
+
+  for (const pdfRem of pdfRems) {
+    const fileName = await getUploadedFileName(plugin, pdfRem);
+    await collectHighlightsForRem(pdfRem, plugin, fileName, rows);
+  }
+
+  if (rows.length === 0) {
+    await plugin.app.toast('No PDF highlights found to export.');
+    return;
+  }
+
+  const xml = buildExcelXml(rows);
+  downloadExcel(xml);
+
+  await plugin.app.toast(`Excel download started for ${rows.length} highlights.`);
+}
+
+async function probeUploadedFileSlot(
+  plugin: ReactRNPlugin,
+  rem: Rem,
+  slot: string,
+): Promise<SlotProbeResult> {
+  const remText = await remTextToString(plugin, rem);
+
+  try {
+    const value = await rem.getPowerupProperty(BuiltInPowerupCodes.UploadedFile, slot);
+
+    return {
+      remId: rem._id,
+      remText,
+      slot,
+      ok: true,
+      value: safeJson(value),
+    };
+  } catch (error) {
+    return {
+      remId: rem._id,
+      remText,
+      slot,
+      ok: false,
+      value: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function demoUploadedFileSlotReads(plugin: ReactRNPlugin): Promise<void> {
+  await plugin.app.toast('Running UploadedFile slot demo. Check the console.');
+
+  const uploadedFileRems = await getUploadedFileRems(plugin);
+
+  if (uploadedFileRems.length === 0) {
+    logMessage('No Rems found that are confirmed UploadedFile Rems.');
+    await plugin.app.toast('No confirmed UploadedFile Rems found.');
+    return;
+  }
+
+  logMessage(`Found ${uploadedFileRems.length} confirmed UploadedFile Rem(s).`);
+  logMessage(`BuiltInPowerupCodes.UploadedFile = ${safeJson(BuiltInPowerupCodes.UploadedFile)}`);
+
+  const maxRemsToProbe = 5;
+  const remsToProbe = uploadedFileRems.slice(0, maxRemsToProbe);
+
+  let successCount = 0;
+  let failureCount = 0;
+
+  for (const rem of remsToProbe) {
+    const remText = await remTextToString(plugin, rem);
+    const confirmed = await rem.hasPowerup(BuiltInPowerupCodes.UploadedFile).catch(() => false);
+
+    logMessage('------------------------------------------------------------');
+    logMessage(`Rem id=${rem._id}`);
+    logMessage(`Confirmed UploadedFile=${confirmed}`);
+    logMessage(`Rem text=${remText}`);
+
+    if (!confirmed) {
+      logMessage('Skipping because this Rem is not confirmed as UploadedFile.');
+      continue;
+    }
+
+    for (const slot of UPLOADED_FILE_SLOTS_TO_PROBE) {
+      const result = await probeUploadedFileSlot(plugin, rem, slot);
+
+      if (result.ok) {
+        successCount += 1;
+        logMessage(
+          `OK slot="${result.slot}" value=${result.value}`,
+        );
+      } else {
+        failureCount += 1;
+        logMessage(
+          `FAIL slot="${result.slot}" error=${safeJson(result.value)}`,
+        );
+      }
+    }
+  }
+
+  logMessage('------------------------------------------------------------');
+  logMessage(
+    `Demo complete. Probed ${remsToProbe.length}/${uploadedFileRems.length} UploadedFile Rem(s). Successes=${successCount}, Failures=${failureCount}`,
   );
 
-  const csv = [header.join(','), ...rows].join('\n');
-  downloadCsv(csv);
-  await plugin.app.toast(`CSV download started for ${persistedState.events.length} reading events.`);
+  await plugin.app.toast(
+    `UploadedFile slot demo complete. Successes=${successCount}, Failures=${failureCount}. Check console.`,
+  );
 }
 
 async function onActivate(plugin: ReactRNPlugin) {
-  await loadReadingState(plugin);
+  const pluginId = plugin.manifest?.id ?? 'remnote-export-highlights-plugin';
 
-  cleanupListeners = installVisibilityListeners();
-  stopOpenDocumentWatcher = startOpenDocumentWatcher(plugin, 750);
-  stopStateFlushTicker = startStateFlushTicker(plugin, TICK_MS);
-
-  const pluginId = plugin.manifest?.id ?? 'remnote-reading-stats-plugin';
   await plugin.app.registerCommand({
-    id: `${pluginId}:export-reading-events-csv`,
-    name: 'Export Reading Events to CSV',
-    description: 'Export tracked reading events (start, finish, document, ended reason) to CSV.',
-    keywords: 'reading stats export csv events',
+    id: `${pluginId}:export-highlights-excel`,
+    name: 'Export PDF Highlights to Excel',
+    description: 'Export all PDF highlights with file name, text, page number, and updated timestamp.',
+    keywords: 'pdf highlight export excel xls',
     action: async () => {
-      await exportReadingEvents(plugin);
+      await exportHighlights(plugin);
+    },
+  });
+
+  await plugin.app.registerCommand({
+    id: `${pluginId}:demo-uploaded-file-slot-reads`,
+    name: 'Demo UploadedFile Slot Reads',
+    description:
+      'Replicate UploadedFile powerup slot reads and log working/misleading failing slots to the console.',
+    keywords: 'uploaded file powerup slot readpercent viewerdata debug demo',
+    action: async () => {
+      await demoUploadedFileSlotReads(plugin);
     },
   });
 }
 
-async function onDeactivate(plugin: ReactRNPlugin) {
-  cleanupListeners?.();
-  cleanupListeners = undefined;
-
-  stopOpenDocumentWatcher?.();
-  stopOpenDocumentWatcher = undefined;
-
-  stopStateFlushTicker?.();
-  stopStateFlushTicker = undefined;
-
-  closeCurrentEvent('deactivate');
-  await flushReadingState(plugin, true);
-}
+async function onDeactivate(_: ReactRNPlugin) {}
 
 declareIndexPlugin(onActivate, onDeactivate);
