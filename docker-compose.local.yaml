@@ -6,6 +6,6 @@ services:
     volumes:
       - ./:/usr/src/app
     ports:
-      - "8081:8080"
+      - "8443:8080"
     command: npm run dev
     stop_grace_period: 0s
