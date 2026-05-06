@@ -2,9 +2,10 @@ import {
   BuiltInPowerupCodes,
   declareIndexPlugin,
   type ReactRNPlugin,
-  type Rem,
   type RNPlugin,
 } from '@remnote/plugin-sdk';
+
+import { PluginRem } from '@remnote/plugin-sdk';
 
 type EndReason = 'visibility' | 'closed' | 'switched' | 'deactivate';
 
@@ -43,15 +44,15 @@ function parseReadingState(value: unknown): ReadingSessionState {
   const maybeState = value as Partial<ReadingSessionState>;
   const events = Array.isArray(maybeState.events)
     ? maybeState.events.filter(
-        (event): event is ReadingEvent =>
-          Boolean(
-            event &&
-              typeof event.startedTimestamp === 'number' &&
-              typeof event.finishedTimestamp === 'number' &&
-              typeof event.documentName === 'string' &&
-              typeof event.endedReason === 'string',
-          ),
-      )
+      (event): event is ReadingEvent =>
+        Boolean(
+          event &&
+          typeof event.startedTimestamp === 'number' &&
+          typeof event.finishedTimestamp === 'number' &&
+          typeof event.documentName === 'string' &&
+          typeof event.endedReason === 'string',
+        ),
+    )
     : [];
 
   const current =
@@ -59,9 +60,9 @@ function parseReadingState(value: unknown): ReadingSessionState {
     typeof maybeState.current.startedTimestamp === 'number' &&
     typeof maybeState.current.documentName === 'string'
       ? {
-          startedTimestamp: maybeState.current.startedTimestamp,
-          documentName: maybeState.current.documentName,
-        }
+        startedTimestamp: maybeState.current.startedTimestamp,
+        documentName: maybeState.current.documentName,
+      }
       : null;
 
   return { current, events };
@@ -109,7 +110,7 @@ function startCurrentEvent(documentName: string): void {
   markDirty();
 }
 
-async function getOpenUploadedFileRem(plugin: RNPlugin): Promise<Rem | null> {
+async function getOpenUploadedFileRem(plugin: RNPlugin): Promise<PluginRem | null> {
   const paneId = await plugin.window.getFocusedPaneId().catch(() => undefined);
   const remId = paneId
     ? await plugin.window.getOpenPaneRemId(paneId).catch(() => undefined)
@@ -121,6 +122,13 @@ async function getOpenUploadedFileRem(plugin: RNPlugin): Promise<Rem | null> {
   if (!rem) return null;
 
   const hasUploadedFile = await rem.hasPowerup(BuiltInPowerupCodes.UploadedFile).catch(() => false);
+  if (hasUploadedFile) {
+    const readPercent = await rem.getPowerupProperty(
+      BuiltInPowerupCodes.UploadedFile,
+      'ReadPercent',
+    );
+    console.log(`Read percent for ${remId}: ${readPercent}`);
+  }
   return hasUploadedFile ? rem : null;
 }
 
